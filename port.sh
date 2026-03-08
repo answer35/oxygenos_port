@@ -2185,7 +2185,6 @@ fi
 		    fi
 		fi
 # High Performance Outdoor Mode
->>>>>>> a6b7804 (Bug Fixes)
 add_prop_v2 "ro.oplus.ridermode.support_feature_switch" "11"
 
 # Enabling WeChat Moments GIFs/Live Photos
