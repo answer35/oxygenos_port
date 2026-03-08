@@ -7,25 +7,43 @@ if [ "$(id -u)" != "0" ] && [ "$(uname -m)" == "x86_64" ]  && [  "$(uname)" == "
     exit
 fi
 
-if [ "$(uname -m)" == "x86_64" ] && [  "$(uname)" == "Linux" ];then
-    echo "Device arch: Linux x86_64"
+OS="$(uname)"
+ARCH="$(uname -m)"
+
+if [ "$OS" == "Linux" ]; then
+    . /etc/os-release
+fi
+
+# Debian / Ubuntu
+if [ "$OS" == "Linux" ] && [ "$ARCH" == "x86_64" ] && [[ "$ID" == "ubuntu" || "$ID" == "debian" ]]; then
+    echo "Device arch: Linux x86_64 (Debian/Ubuntu)"
     apt update -y
     apt upgrade -y
     apt install -y aria2 python3 busybox zip unzip p7zip-full openjdk-21-jre zstd bc android-sdk-libsparse-utils xmlstarlet
-    if [ $? -ne 0 ];then
-        echo "安装可能出错，请手动执行：apt install -y aria2 python3 busybox zip unzip p7zip-full openjdk-21-jre zstd bc xmlstarlet"
+
+    if [ $? -ne 0 ]; then
+        echo "Installation may fail. Please perform manually:"
+        echo "apt install -y aria2 python3 busybox zip unzip p7zip-full openjdk-21-jre zstd bc xmlstarlet"
     fi
 fi
 
-if [ "$(uname -m)" == "aarch64" ];then
-    echo "Device arch: aarch64"
+# Fedora
+if [ "$OS" == "Linux" ] && [ "$ARCH" == "x86_64" ] && [ "$ID" == "fedora" ]; then
+    echo "Device arch: Linux x86_64 (Fedora)"
+    dnf upgrade -y
+    dnf install -y aria2 python3 busybox zip unzip p7zip p7zip-plugins java-21-openjdk zstd bc android-tools xmlstarlet
+fi
+
+# aarch64 (Debian/Ubuntu)
+if [ "$OS" == "Linux" ] && [ "$ARCH" == "aarch64" ] && [[ "$ID" == "ubuntu" || "$ID" == "debian" ]]; then
+    echo "Device arch: Linux aarch64"
     apt update -y
     apt upgrade -y
-    apt install -y python busybox zip unzip p7zip openjdk-21 zipalign zstd xmlstarlet
+    apt install -y python3 busybox zip unzip p7zip-full openjdk-21-jre zipalign zstd xmlstarlet
 fi
 
 if [ "$(uname)" == "Darwin" ] && [ "$(uname -m)" == "x86_64" ];then
-    echo "Devcie arch: MacOS X86_X64"
+    echo "Device arch: MacOS X86_X64"
     pip3 install buysbox
     brew install aria2 openjdk zstd coreutils gdu gnu-sed gnu-getopt grep xmlstarlet
 fi
