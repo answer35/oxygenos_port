@@ -15,3 +15,7 @@ remove_data_encryption=false
 # Needed to manually extend super partition, in order to flash it successfully. 
 super_extended=false
 pack_method=stock
+
+pack_with_dsu=false
+ddr_type=lpddr4x
+reusabe_partition_list=

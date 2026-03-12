@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import os
+import sys
 from difflib import SequenceMatcher
 from typing import Generator, Any
 from re import escape, match
@@ -199,6 +200,9 @@ def Usage():
     print("%s <folder> <fs_config>" % (sys.argv[0]))
     print("    This script will auto patch file_context")
 
+print("ContextPatch started")
+print("Directory:", sys.argv[1] if len(sys.argv) > 1 else "unknown")
+print("fs_config:", sys.argv[2] if len(sys.argv) > 2 else "unknown")
 
 if __name__ == "__main__":
     import sys

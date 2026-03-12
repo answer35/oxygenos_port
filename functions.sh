@@ -149,10 +149,35 @@ patch_smali() {
                 rm -rf ${targetfilefullpath}
 
                 # Align moddified APKs, to avoid error "Targeting R+ (version 30 and above) requires the resources.arsc of installed APKs to be stored uncompressed and aligned on a 4-byte boundary" 
-                zipalign -p -f -v 4 tmp/$foldername/$targetfilename ${targetfilefullpath} > /dev/null 2>&1 || error "zipalign错误，请检查原因。" "zipalign error,please check for any issues"
+
+                echo "Running zipalign on ${targetfilefullpath}"
+
+                if ! zipalign -p -f -v 4 tmp/$foldername/$targetfilename ${targetfilefullpath}; then
+                    echo "ERROR: zipalign failed for ${targetfilefullpath}"
+                    exit 1
+                fi
+
                 yellow "apk zipalign处理完成" "APK ZipAlign process completed."
                 yellow "开始apksigner签名" "ApkSinger signing.."
-                apksigner sign -v --key otatools/key/testkey.pk8 --cert otatools/key/testkey.x509.pem ${targetfilefullpath}
+
+
+                echo "Signing APK: ${targetfilefullpath}"
+
+                if ! apksigner sign -v \
+                --key otatools/key/testkey.pk8 \
+                --cert otatools/key/testkey.x509.pem \
+                ${targetfilefullpath}; then
+                    echo "ERROR: APK signing failed: ${targetfilefullpath}"
+                    exit 1
+                fi
+
+                echo "Verifying APK: ${targetfilefullpath}"
+
+                if ! apksigner verify -v ${targetfilefullpath}; then
+                    echo "ERROR: APK verification failed: ${targetfilefullpath}"
+                    exit 1
+                fi
+
                 apksigner verify -v ${targetfilefullpath}
                 yellow "复制APK到目标位置：${targetfilefullpath}" "Copying APK to target ${targetfilefullpath}"
             else
@@ -325,30 +350,120 @@ patch_kernel() {
     fi
     cp "$bootimg" boot.img
 
-    blue "解包 boot.img" "调用 magiskboot unpack"
-    magiskboot unpack -h boot.img > /dev/null 2>&1
-    if [ $? -ne 0 ]; then
-        error "解包 boot.img 失败"
-        exit 1
-    fi
+#    blue "解包 boot.img" "调用 magiskboot unpack"
+#    magiskboot unpack -h boot.img > /dev/null 2>&1
+#    if [ $? -ne 0 ]; then
+#        error "解包 boot.img 失败"
+#        exit 1
+#    fi
 
     # 处理 ramdisk.cpio（如果存在）
-    if [ -f ramdisk.cpio ]; then
-        local comp
-        comp=$(magiskboot decompress ramdisk.cpio | grep -v 'raw' | sed -n 's;.*\[\(.*\)\];\1;p')
-        if [ -n "$comp" ]; then
-            mv -f ramdisk.cpio ramdisk.cpio."$comp"
-            magiskboot decompress ramdisk.cpio."$comp" ramdisk.cpio > /dev/null 2>&1
-            if [ $? -ne 0 ] && $comp --help > /dev/null 2>&1; then
-                $comp -dc ramdisk.cpio."$comp" > ramdisk.cpio
+#    if [ -f ramdisk.cpio ]; then
+#        local comp
+#        comp=$(magiskboot decompress ramdisk.cpio | grep -v 'raw' | sed -n 's;.*\[\(.*\)\];\1;p')
+#        if [ -n "$comp" ]; then
+#            mv -f ramdisk.cpio ramdisk.cpio."$comp"
+#            magiskboot decompress ramdisk.cpio."$comp" ramdisk.cpio > /dev/null 2>&1
+#            if [ $? -ne 0 ] && $comp --help > /dev/null 2>&1; then
+#                $comp -dc ramdisk.cpio."$comp" > ramdisk.cpio
+#            fi
+#        fi
+#        mkdir -p ramdisk
+#        chmod 755 ramdisk
+#        cd ramdisk || { error "无法进入 ramdisk 目录"; exit 1; }
+#        EXTRACT_UNSAFE_SYMLINKS=1 cpio -d -F ../ramdisk.cpio -i > /dev/null 2>&1
+#        cd ..
+#    fi
+
+
+blue "解包 boot.img" "调用 magiskboot unpack"
+magiskboot unpack -h boot.img > /dev/null 2>&1
+if [ $? -ne 0 ]; then
+    error "解包 boot.img 失败"
+    exit 1
+fi
+
+# 处理 ramdisk.cpio（如果存在）
+if [ -f "ramdisk.cpio" ]; then
+    # Détecter le format via magiskboot (capturer stderr aussi)
+    comp=$(magiskboot decompress "ramdisk.cpio" 2>&1 | sed -n 's;.*\[\(.*\)\].*;\1;p' || true)
+
+    # Si detection vide, fallback avec file(1)
+    if [ -z "$comp" ]; then
+        file_out=$(file --brief --mime-type --mime-encoding "ramdisk.cpio" 2>/dev/null || true)
+        if printf '%s\n' "$file_out" | grep -Eqi 'cpio|application/x-cpio|ascii'; then
+            comp="raw"
+        else
+            # on ne connait pas — prévenir et traiter comme raw par sécurité
+            echo "Warning: unknown ramdisk format, treating as raw (magiskboot/file couldn't detect)." >&2
+            comp="raw"
+        fi
+    fi
+
+    echo "Detected ramdisk format: $comp"
+
+    if [ "$comp" != "raw" ]; then
+        # renommer seulement si comp non vide et différent de raw
+        mv -f "ramdisk.cpio" "ramdisk.cpio.$comp" 2>/dev/null || true
+
+        # d'abord tenter magiskboot decompress sur le fichier renommé
+        if magiskboot decompress "ramdisk.cpio.$comp" "ramdisk.cpio" > /dev/null 2>&1; then
+            :
+        else
+            # si magiskboot n'a pas décompressé, tenter d'appeler le binaire détecté (si présent)
+            if command -v "$comp" >/dev/null 2>&1; then
+                echo "Trying external decompressor: $comp"
+                # -dc est commun à gzip/xz/bzip2 ; pour lz4 on utilise lz4 -d -c ; adapter si besoin
+                case "$comp" in
+                    gzip|gunzip)
+                        "$comp" -dc "ramdisk.cpio.$comp" > "ramdisk.cpio"
+                        ;;
+                    xz)
+                        "$comp" -dc "ramdisk.cpio.$comp" > "ramdisk.cpio"
+                        ;;
+                    bzip2|bz2)
+                        "$comp" -dc "ramdisk.cpio.$comp" > "ramdisk.cpio"
+                        ;;
+                    lz4)
+                        "$comp" -d -c "ramdisk.cpio.$comp" > "ramdisk.cpio"
+                        ;;
+                    zstd|zstdmt)
+                        "$comp" -d -c "ramdisk.cpio.$comp" > "ramdisk.cpio"
+                        ;;
+                    brotli|br)
+                        "$comp" -d -c "ramdisk.cpio.$comp" > "ramdisk.cpio"
+                        ;;
+                    *)
+                        echo "Unknown decompressor $comp or unsupported automatic invocation." >&2
+                        exit 1
+                        ;;
+                esac
+                if [ $? -ne 0 ]; then
+                    echo "External decompression with $comp failed." >&2
+                    exit 1
+                fi
+            else
+                echo "Decompressor '$comp' not found and magiskboot couldn't decompress. Aborting." >&2
+                exit 1
             fi
         fi
-        mkdir -p ramdisk
-        chmod 755 ramdisk
-        cd ramdisk || { error "无法进入 ramdisk 目录"; exit 1; }
-        EXTRACT_UNSAFE_SYMLINKS=1 cpio -d -F ../ramdisk.cpio -i > /dev/null 2>&1
-        cd ..
+    else
+        echo "ramdisk is raw cpio; no decompression needed."
     fi
+
+    # 提取 cpio 到 ramdisk 目录（安全提取）
+    rm -rf "ramdisk"
+    mkdir -p "ramdisk"
+    chmod 0755 "ramdisk"
+    # --no-absolute-filenames 防止意外写到根路径
+    # 使用 -idm 创建目录并保留时间戳
+    if ! ( cd "ramdisk" && EXTRACT_UNSAFE_SYMLINKS=1 cpio -idmv --no-absolute-filenames < "../ramdisk.cpio" 2>/dev/null ); then
+        echo "cpio extraction failed (file may be invalid)." >&2
+        # 根据需要：exit 1 或者继续
+        exit 1
+    fi
+fi
+
 
     disable_avb_verify "${tmp_dir}/"
 
@@ -372,20 +487,21 @@ patch_kernel() {
         done
     fi
 
-    if [ -d ramdisk ]; then
-        cd ramdisk || { error "无法进入 ramdisk 目录"; exit 1; }
-        find . | sed 1d | cpio -H newc -R 0:0 -o -F ../ramdisk_new.cpio > /dev/null 2>&1
-        cd ..
-        if [ -n "$comp" ]; then
-            magiskboot compress=$comp ramdisk_new.cpio
-            if [ $? -ne 0 ] && $comp --help > /dev/null 2>&1; then
-                $comp -9c ramdisk_new.cpio > ramdisk.cpio."$comp"
-            fi
-        fi
-        local ramdisk_file
-        ramdisk_file=$(ls ramdisk_new.cpio* | tail -n1)
-        [ -n "$ramdisk_file" ] && cp -f "$ramdisk_file" ramdisk.cpio
-    fi
+#    if [ -d ramdisk ]; then
+#        cd ramdisk || { error "无法进入 ramdisk 目录"; exit 1; }
+#        find . | sed 1d | cpio -H newc -R 0:0 -o -F ../ramdisk_new.cpio > /dev/null 2>&1
+#        cd ..
+#        if [ -n "$comp" ]; then
+#            magiskboot compress=$comp ramdisk_new.cpio
+#            if [ $? -ne 0 ] && $comp --help > /dev/null 2>&1; then
+#                $comp -9c ramdisk_new.cpio > ramdisk.cpio."$comp"
+#            fi
+#        fi
+#        local ramdisk_file
+#        ramdisk_file=$(ls ramdisk_new.cpio* | tail -n1)
+#        [ -n "$ramdisk_file" ] && cp -f "$ramdisk_file" ramdisk.cpio
+#    fi
+
 
     local nocompflag=""
     case $comp in
@@ -443,20 +559,116 @@ patch_kernel() {
             done
         fi
 
-        if [ -d ramdisk ]; then
-            cd ramdisk || { error "无法进入 vendor ramdisk 目录"; exit 1; }
-            find . | sed 1d | cpio -H newc -R 0:0 -o -F ../ramdisk_new.cpio > /dev/null 2>&1
-            cd ..
-            if [ -n "$vcomp" ]; then
-                magiskboot compress=$vcomp ramdisk_new.cpio
-                if [ $? -ne 0 ] && $vcomp --help > /dev/null 2>&1; then
-                    $vcomp -9c ramdisk_new.cpio > ramdisk.cpio."$vcomp"
+#        if [ -d ramdisk ]; then
+#            cd ramdisk || { error "无法进入 vendor ramdisk 目录"; exit 1; }
+#            find . | sed 1d | cpio -H newc -R 0:0 -o -F ../ramdisk_new.cpio > /dev/null 2>&1
+#            cd ..
+#            if [ -n "$vcomp" ]; then
+#                magiskboot compress=$vcomp ramdisk_new.cpio
+#                if [ $? -ne 0 ] && $vcomp --help > /dev/null 2>&1; then
+#                    $vcomp -9c ramdisk_new.cpio > ramdisk.cpio."$vcomp"
+#                fi
+#            fi
+#            local vramdisk
+#            vramdisk=$(ls ramdisk_new.cpio* | tail -n1)
+#            [ -n "$vramdisk" ] && cp -f "$vramdisk" ramdisk.cpio
+#        fi
+
+if [ -d "ramdisk" ]; then
+    cd "ramdisk" || { error "无法进入 ramdisk 目录"; exit 1; }
+    find . | sed 1d | cpio -H newc -R 0:0 -o -F ../ramdisk_new.cpio >/dev/null 2>&1
+    cd ..
+
+    # si comp vide => treat as raw (pas de compression)
+    if [ -z "${comp:-}" ]; then
+        comp="raw"
+    fi
+
+    echo "Repacking ramdisk (method: $comp)"
+
+    ramdisk_file=""
+
+    if [ "$comp" = "raw" ]; then
+        # pas de compression : on garde le cpio tel quel
+        ramdisk_file="ramdisk_new.cpio"
+    else
+        # Essayer magiskboot compress d'abord (certaines versions acceptent: magiskboot compress=<method> in out)
+        if magiskboot compress="$comp" "ramdisk_new.cpio" "ramdisk.cpio" >/dev/null 2>&1; then
+            ramdisk_file="ramdisk.cpio"
+        else
+            # fallback : vérifier que l'outil externe existe avant de l'exécuter
+            if command -v "$comp" >/dev/null 2>&1; then
+                echo "magiskboot failed; using external tool: $comp"
+                case "$comp" in
+                    gzip)
+                        gzip -c -9 "ramdisk_new.cpio" > "ramdisk.cpio.$comp"
+                        ;;
+                    xz)
+                        xz -c -z -9 "ramdisk_new.cpio" > "ramdisk.cpio.$comp"
+                        ;;
+                    bzip2|bz2)
+                        bzip2 -c -9 "ramdisk_new.cpio" > "ramdisk.cpio.$comp"
+                        ;;
+                    lz4)
+                        lz4 -q "ramdisk_new.cpio" "ramdisk.cpio.$comp"
+                        ;;
+                    zstd|zstdmt)
+                        zstd -q -19 -o "ramdisk.cpio.$comp" "ramdisk_new.cpio"
+                        ;;
+                    brotli|br)
+                        brotli -q -f -o "ramdisk.cpio.$comp" "ramdisk_new.cpio"
+                        ;;
+                    *)
+                        echo "Unsupported compressor for fallback: '$comp'." >&2
+                        exit 1
+                        ;;
+                esac
+
+                if [ $? -ne 0 ]; then
+                    echo "External compression with $comp failed." >&2
+                    exit 1
                 fi
+                ramdisk_file="ramdisk.cpio.$comp"
+            else
+                echo "magiskboot failed and compressor '$comp' not found. Aborting." >&2
+                exit 1
             fi
-            local vramdisk
-            vramdisk=$(ls ramdisk_new.cpio* | tail -n1)
-            [ -n "$vramdisk" ] && cp -f "$vramdisk" ramdisk.cpio
         fi
+    fi
+
+    # si comp=raw on voudra peut-être renommer ramdisk_new.cpio -> ramdisk.cpio pour la suite
+    if [ -z "${ramdisk_file:-}" ] || [ ! -f "$ramdisk_file" ]; then
+        echo "No ramdisk output produced (ramdisk_file='$ramdisk_file')." >&2
+        exit 1
+    fi
+
+    # éviter l'erreur "same file": comparer realpath si possible
+    if command -v realpath >/dev/null 2>&1; then
+        src="$(realpath -- "$ramdisk_file")"
+        dst="$(realpath -- "ramdisk.cpio" 2>/dev/null || printf '%s\n' "$(pwd)/ramdisk.cpio")"
+    else
+        src="$(cd "$(dirname -- "$ramdisk_file")" && pwd -P)/$(basename -- "$ramdisk_file")"
+        dst="$(cd . && pwd -P)/ramdisk.cpio"
+    fi
+
+    if [ "$src" = "$dst" ]; then
+        echo "Final ramdisk already at $dst"
+    else
+        # prefer mv, fallback cp
+        if mv -f -- "$ramdisk_file" "ramdisk.cpio" 2>/dev/null; then
+            :
+        else
+            cp -f -- "$ramdisk_file" "ramdisk.cpio" || {
+                echo "Failed to copy $ramdisk_file -> ramdisk.cpio" >&2
+                exit 1
+            }
+        fi
+    fi
+
+    # cleanup
+    [ -f "ramdisk_new.cpio" ] && rm -f "ramdisk_new.cpio"
+fi
+
 
         local v_nocompflag=""
         case $vcomp in
@@ -769,8 +981,8 @@ add_prop_from_port() {
     # 处理强制添加属性
     for key in "${force_keys[@]}"; do
         # 安全获取属性值（处理换行符）
-        value=$(grep -m1 "^${key}=" "$old_portrom_prop" | awk -F'=' '{print $2}' | tr -d '\n\r')
-        
+        value=$(grep -m1 "^${key}=" "$old_portrom_prop" || true | awk -F'=' '{print $2}' | tr -d '\n\r')
+
         if [[ -n "$value" ]]; then
             # 删除可能已存在的旧值
             sed -i "/^${key}=/d" "$temp_file" 2>/dev/null
@@ -787,6 +999,11 @@ add_prop_from_port() {
 smali_wrapper() {
     source_dr=$(realpath $1)
     source_apk=$(realpath $2)
+
+    echo "==== SMALI WRAPPER START ===="
+    echo "Source dir: $source_dr"
+    echo "Target apk: $source_apk"
+
     if [[ $is_eu_rom == "true" ]]; then
        SMALI_COMMAND="java -jar bin/apktool/smali-3.0.5.jar"
        BAKSMALI_COMMAND="java -jar bin/apktool/baksmali-3.0.5.jar" 
@@ -795,18 +1012,40 @@ smali_wrapper() {
        BAKSMALI_COMMAND="java -jar bin/apktool/baksmali.jar"
     fi
 
-    for classes_folder in $(find $source_dr -maxdepth 1 -type d -name "classes*");do
+    echo "Using smali command: $SMALI_COMMAND"
+
+    for classes_folder in $(find $source_dr -maxdepth 1 -type d -name "classes*"); do
         classes=$(basename $classes_folder)
-        ${SMALI_COMMAND} a --api ${port_android_sdk} $source_dr/${classes} -o $source_dr/${classes}.dex || error " Smaling 失败" "Smaling failed"
+
+        echo "Rebuilding dex for $classes"
+
+        if ! ${SMALI_COMMAND} a --api ${port_android_sdk} $source_dr/${classes} -o $source_dr/${classes}.dex; then
+            echo "ERROR: smali compile failed for $classes"
+            exit 1
+        fi
     done
 
     pushd $source_dr >/dev/null || exit
+
     for classes_dex in $(find . -type f -name "*.dex"); do
-        7z a -y -mx0 -tzip $(realpath $source_apk) $classes_dex >/dev/null || error "修改$source_apk" "Failed to modify $source_apk"
+        echo "Injecting $classes_dex into $source_apk"
+
+        if ! 7z a -y -mx0 -tzip $(realpath $source_apk) $classes_dex; then
+            echo "ERROR: failed to inject $classes_dex into $source_apk"
+            exit 1
+        fi
     done
+
     popd >/dev/null || exit
-    
-    
+
+    if [ ! -f "$source_apk" ]; then
+        echo "ERROR: APK rebuild failed: $source_apk"
+        exit 1
+    fi
+
+    echo "APK rebuilt successfully: $source_apk"
+    echo "==== SMALI WRAPPER END ===="
+
     yellow "修补$source_apk 完成" "Fix $source_apk completed"
 }
 

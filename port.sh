@@ -10,6 +10,28 @@
 
 # Test Port ROM: OnePlus 12 (ColorOS_14.0.0.810), OnePlus ACE3V(ColorOS_14.0.1.621) Realme GT Neo5 240W(RMX3708_14.0.0.800)
 
+
+# Add global log file generation
+LOGFILE=build_$(date +%Y%m%d_%H%M%S).log
+exec > >(tee -a "$LOGFILE") 2>&1
+
+echo "============================="
+echo " ColorOS Port Build Started"
+echo "============================="
+echo "Date: $(date)"
+echo "User: $(whoami)"
+echo "Host: $(hostname)"
+echo "Kernel: $(uname -r)"
+echo "CPU: $(lscpu | grep 'Model name' | sed 's/Model name://')"
+echo "RAM: $(free -h)"
+echo "============================="
+
+# Stop script if any error encountered
+set -e
+set -o pipefail
+set -x
+
+
 build_user="Bruce Teng"
 build_host=$(hostname)
 
@@ -25,7 +47,25 @@ export PATH=$(pwd)/bin/$(uname)/$(uname -m)/:$(pwd)/otatools/bin/:$PATH
 # Import functions
 source functions.sh
 
+export JAVA_HOME=/usr/lib/jvm/temurin-17-jdk
+export PATH=$JAVA_HOME/bin:$PATH
+
+echo "Using JAVA_HOME=$JAVA_HOME"
+java -version
+
 check unzip aria2c 7z zip java python3 zstd bc xmlstarlet
+
+echo "Tool versions:"
+echo "java: $(java -version 2>&1 | head -n1)"
+echo "python3: $(python3 --version)"
+echo "zipalign: $(which zipalign)"
+echo "apksigner: $(which apksigner)"
+echo "mkfs.erofs: $(which mkfs.erofs)"
+mkfs.erofs -V || true
+echo "xmlstarlet: $(which xmlstarlet)"
+echo "7z: $(which 7z)"
+echo "================================="
+
 
 # 可在 bin/port_config 中更改
 port_partition=$(grep "partition_to_port" bin/port_config |cut -d '=' -f 2)
@@ -226,7 +266,15 @@ if [[ -n ${version_name} ]] && [[ -d build/${version_name} ]]; then
          "Cached ${version_name} folder detected, copying..."
     IFS=',' read -ra PARTS <<< "$port_partition"
     for i in "${PARTS[@]}"; do
-        cp -rfv "build/${version_name}/${i}.img" build/portrom/images/
+#        cp -rfv "build/${version_name}/${i}.img" build/portrom/images/
+        if [[ -f "build/${version_name}/${i}.img" ]]; then
+            cp -rfv "build/${version_name}/${i}.img" build/portrom/images/
+        elif [[ -f "devices/common/${i}_empty.img" ]]; then
+            yellow "${i}.img missing, using empty image"
+            cp -rfv "devices/common/${i}_empty.img" "build/portrom/images/${i}.img"
+        else
+            yellow "${i}.img missing, skipping"
+        fi
     done
 
 else
@@ -235,7 +283,16 @@ else
     if [[ ${portrom_type} == 'payload' ]]; then
         blue "正在提取移植包 [payload.bin]" "Extracting PORTROM [payload.bin]"
         payload-dumper --partitions "${port_partition}" --out "build/${version_name}/" "${portrom}"
-        cp -rfv build/${version_name}/*.img build/portrom/images/
+#	cp -rfv build/${version_name}/${i}.img build/portrom/images/
+	if [ -f build/${version_name}/${i}.img ]; then
+	    cp -rfv build/${version_name}/${i}.img build/portrom/images/
+	elif [ -f devices/common/${i}_empty.img ]; then
+	    yellow "${i}.img missing, using empty image"
+	    cp -rfv devices/common/${i}_empty.img build/portrom/images/${i}.img
+	else
+	    yellow "${i}.img missing and no empty image found, skipping"
+	fi
+
         green "移植包 [payload.bin] 提取完毕" "[payload.bin] extracted."
 
     elif [[ ${portrom_type} == 'img' ]]; then
@@ -256,8 +313,22 @@ else
         error "解压指定 img 文件失败，请检查包中是否包含 ${port_partition}" \
           "Failed to extract specified img files from PORTROM."
 
-         green "指定分区镜像解压完成" "Selected partitions extracted successfully."
+        green "指定分区镜像解压完成" "Selected partitions extracted successfully."
         find "build/${version_name}/" -type f -name "*.img" -exec cp -fv {} build/portrom/images/ \;
+
+	for part in "${PARTS[@]}"; do
+	    part=$(echo "$part" | xargs)
+
+	    if [ ! -f "build/portrom/images/${part}.img" ]; then
+	        if [ -f "devices/common/${part}_empty.img" ]; then
+	            yellow "${part}.img missing, using empty image"
+	            cp -fv "devices/common/${part}_empty.img" "build/portrom/images/${part}.img"
+	        else
+	            yellow "${part}.img missing and no empty image found"
+	        fi
+	    fi
+	done
+
         green "移植包 [*.img] 提取完毕" "[*.img] extracted."
 
     else
@@ -363,65 +434,68 @@ rm -rf config
 blue "正在获取ROM参数" "Fetching ROM build prop."
 
 # 安卓版本
-base_android_version=$(< build/baserom/images/system/system/build.prop grep "ro.build.version.release" |awk 'NR==1' |cut -d '=' -f 2)
-port_android_version=$(< build/portrom/images/system/system/build.prop grep "ro.build.version.release" |awk 'NR==1' |cut -d '=' -f 2)
+base_android_version=$(grep "ro.build.version.release" build/baserom/images/system/system/build.prop |awk 'NR==1' |cut -d '=' -f 2)
+port_android_version=$(grep "ro.build.version.release" build/portrom/images/system/system/build.prop |awk 'NR==1' |cut -d '=' -f 2)
 green "安卓版本: 底包为[Android ${base_android_version}], 移植包为 [Android ${port_android_version}]" "Android Version: BASEROM:[Android ${base_android_version}], PORTROM [Android ${port_android_version}]"
 
 # SDK版本
-base_android_sdk=$(< build/baserom/images/system/system/build.prop grep "ro.system.build.version.sdk" |awk 'NR==1' |cut -d '=' -f 2)
-port_android_sdk=$(< build/portrom/images/system/system/build.prop grep "ro.system.build.version.sdk" |awk 'NR==1' |cut -d '=' -f 2)
+base_android_sdk=$(grep "ro.system.build.version.sdk" build/baserom/images/system/system/build.prop |awk 'NR==1' |cut -d '=' -f 2)
+port_android_sdk=$(grep "ro.system.build.version.sdk" build/portrom/images/system/system/build.prop |awk 'NR==1' |cut -d '=' -f 2)
 green "SDK 版本: 底包为 [SDK ${base_android_sdk}], 移植包为 [SDK ${port_android_sdk}]" "SDK Verson: BASEROM: [SDK ${base_android_sdk}], PORTROM: [SDK ${port_android_sdk}]"
 
 # ROM版本
-base_rom_version=$(<  build/baserom/images/my_manifest/build.prop grep "ro.build.display.ota" | awk 'NR==1' | cut -d '=' -f 2 | cut -d "_" -f 2-)
-port_rom_version=$(<  build/portrom/images/my_manifest/build.prop grep "ro.build.display.ota" | awk 'NR==1' | cut -d '=' -f 2 | cut -d "_" -f 2-)
+base_rom_version=$(grep "ro.build.display.ota" build/baserom/images/my_manifest/build.prop | awk 'NR==1' | cut -d '=' -f 2 | cut -d "_" -f 2-)
+port_rom_version=$(grep "ro.build.display.ota" build/portrom/images/my_manifest/build.prop | awk 'NR==1' | cut -d '=' -f 2 | cut -d "_" -f 2-)
 green "ROM 版本: 底包为 [${base_rom_version}], 移植包为 [${port_rom_version}]" "ROM Version: BASEROM: [${base_rom_version}], PORTROM: [${port_rom_version}] "
 
 #ColorOS版本号获取
 
-base_device_code=$(< build/baserom/images/my_manifest/build.prop grep "ro.oplus.version.my_manifest" | awk 'NR==1' | cut -d '=' -f 2 | cut -d "_" -f 1)
-port_device_code=$(< build/portrom/images/my_manifest/build.prop grep "ro.oplus.version.my_manifest" | awk 'NR==1' | cut -d '=' -f 2 | cut -d "_" -f 1)
+base_device_code=$(grep "ro.oplus.version.my_manifest" build/baserom/images/my_manifest/build.prop | awk 'NR==1' | cut -d '=' -f 2 | cut -d "_" -f 1)
+port_device_code=$(grep "ro.oplus.version.my_manifest" build/portrom/images/my_manifest/build.prop | awk 'NR==1' | cut -d '=' -f 2 | cut -d "_" -f 1)
 
 green "机型代号: 底包为 [${base_device_code}], 移植包为 [${port_device_code}]" "Device Code: BASEROM: [${base_device_code}], PORTROM: [${port_device_code}]"
 # 代号
-base_product_device=$(< build/baserom/images/my_manifest/build.prop grep "ro.product.device" |awk 'NR==1' |cut -d '=' -f 2)
-port_product_device=$(< build/portrom/images/my_manifest/build.prop grep "ro.product.device" |awk 'NR==1' |cut -d '=' -f 2)
+base_product_device=$(grep "ro.product.device" build/baserom/images/my_manifest/build.prop |awk 'NR==1' |cut -d '=' -f 2)
+port_product_device=$(grep "ro.product.device" build/portrom/images/my_manifest/build.prop |awk 'NR==1' |cut -d '=' -f 2)
 green "Product机型: 底包为 [${base_product_device}], 移植包为 [${port_product_device}]" "Product Device: BASEROM: [${base_product_device}], PORTROM: [${port_product_device}]"
 
-base_product_name=$(< build/baserom/images/my_manifest/build.prop grep "ro.product.name" |awk 'NR==1' |cut -d '=' -f 2)
-port_product_name=$(< build/portrom/images/my_manifest/build.prop grep "ro.product.name" |awk 'NR==1' |cut -d '=' -f 2)
+base_product_name=$(grep "ro.product.name" build/baserom/images/my_manifest/build.prop |awk 'NR==1' |cut -d '=' -f 2)
+port_product_name=$(grep "ro.product.name" build/portrom/images/my_manifest/build.prop |awk 'NR==1' |cut -d '=' -f 2)
 green "Product名称: 底包为 [${base_product_name}], 移植包为 [${port_product_name}]" "Product Name: BASEROM: [${base_product_name}], PORTROM: [${port_product_name}]"
 
-base_product_model=$(< build/baserom/images/my_manifest/build.prop grep "ro.product.model" |awk 'NR==1' |cut -d '=' -f 2)
-port_product_model=$(< build/portrom/images/my_manifest/build.prop grep "ro.product.model" |awk 'NR==1' |cut -d '=' -f 2)
+base_product_model=$(grep "ro.product.model" build/baserom/images/my_manifest/build.prop |awk 'NR==1' |cut -d '=' -f 2)
+port_product_model=$(grep "ro.product.model" build/portrom/images/my_manifest/build.prop |awk 'NR==1' |cut -d '=' -f 2)
 green "Product型号: 底包为 [${base_product_model}], 移植包为 [${port_product_model}]" "Product Model: BASEROM: [${base_product_model}], PORTROM: [${port_product_model}]"
 if grep -q "ro.vendor.oplus.market.name" build/baserom/images/my_manifest/build.prop;then
-    base_market_name=$(< build/baserom/images/my_manifest/build.prop grep "ro.vendor.oplus.market.name" |awk 'NR==1' |cut -d '=' -f 2)
+    base_market_name=$(grep "ro.vendor.oplus.market.name" build/baserom/images/my_manifest/build.prop |awk 'NR==1' |cut -d '=' -f 2)
 else
-    base_market_name=$(< build/portrom/images/odm/build.prop grep "ro.vendor.oplus.market.name" |awk 'NR==1' |cut -d '=' -f 2)
+    base_market_name=$(grep "ro.vendor.oplus.market.name" build/portrom/images/odm/build.prop |awk 'NR==1' |cut -d '=' -f 2)
 fi
 
 port_market_name=$(grep -r --include="*.prop"  --exclude-dir="odm" "ro.vendor.oplus.market.name" build/portrom/images/ | head -n 1 | awk "NR==1" | cut -d "=" -f2)
 
 green "市场名称: 底包为 [${base_market_name}], 移植包为 [${port_market_name}]" "Market Name: BASEROM: [${base_market_name}], PORTROM: [${port_market_name}]"
 
-base_my_product_type=$(< build/baserom/images/my_product/build.prop grep "ro.oplus.image.my_product.type" |awk 'NR==1' |cut -d '=' -f 2)
-port_my_product_type=$(< build/portrom/images/my_product/build.prop grep "ro.oplus.image.my_product.type" |awk 'NR==1' |cut -d '=' -f 2)
+base_my_product_type=$(grep "ro.oplus.image.my_product.type" build/baserom/images/my_product/build.prop |awk 'NR==1' |cut -d '=' -f 2)
+port_my_product_type=$(grep "ro.oplus.image.my_product.type" build/portrom/images/my_product/build.prop |awk 'NR==1' |cut -d '=' -f 2)
 
 green "my_product类型: 底包为 [${base_my_product_type}], 移植包为 [${port_my_product_type}]" "My_Product Type: BASEROM: [${base_my_product_type}], PORTROM: [${port_my_product_type}]"
 
-target_display_id=$(< build/portrom/images/my_manifest/build.prop grep "ro.build.display.id=" |awk 'NR==1' |cut -d '=' -f 2 | sed "s/$port_device_code/$base_device_code/g")
+target_display_id=$(grep "ro.build.display.id=" build/portrom/images/my_manifest/build.prop |awk 'NR==1' |cut -d '=' -f 2 | sed "s/$port_device_code/$base_device_code/g")
 
-target_display_id_show=$(< build/portrom/images/my_manifest/build.prop grep "ro.build.display.id.show" |awk 'NR==1' |cut -d '=' -f 2 | sed "s/$port_device_code/$base_device_code/g") 
+target_display_id_show=$(grep "ro.build.display.id.show" build/portrom/images/my_manifest/build.prop |awk 'NR==1' |cut -d '=' -f 2 | sed "s/$port_device_code/$base_device_code/g") 
 
-base_vendor_brand=$(< build/baserom/images/my_manifest/build.prop grep "ro.product.vendor.brand" |awk 'NR==1' |cut -d '=' -f 2)
-port_vendor_brand=$(< build/portrom/images/my_manifest/build.prop grep "ro.product.vendor.brand" |awk 'NR==1' |cut -d '=' -f 2)
+base_vendor_brand=$(grep "ro.product.vendor.brand" build/baserom/images/my_manifest/build.prop |awk 'NR==1' |cut -d '=' -f 2)
+port_vendor_brand=$(grep "ro.product.vendor.brand" build/portrom/images/my_manifest/build.prop |awk 'NR==1' |cut -d '=' -f 2)
 
-base_product_first_api_level=$(< build/baserom/images/my_manifest/build.prop grep "ro.product.first_api_level" |awk 'NR==1' |cut -d '=' -f 2)
-port_product_first_api_level=$(< build/portrom/images/my_manifest/build.prop grep "ro.product.first_api_level" |awk 'NR==1' |cut -d '=' -f 2)
+base_product_first_api_level=$(grep "ro.product.first_api_level" build/baserom/images/my_manifest/build.prop |awk 'NR==1' |cut -d '=' -f 2)
+port_product_first_api_level=$(grep "ro.product.first_api_level" build/portrom/images/my_manifest/build.prop |awk 'NR==1' |cut -d '=' -f 2)
 
-base_device_family=$(< build/baserom/images/my_product/build.prop grep "ro.build.device_family" |awk 'NR==1' |cut -d '=' -f 2)
-target_device_family=$(< build/portrom/images/my_product/build.prop grep "ro.build.device_family" |awk 'NR==1' |cut -d '=' -f 2)
+base_device_family=$(grep "ro.build.device_family" build/baserom/images/my_product/build.prop |awk 'NR==1' |cut -d '=' -f 2)
+target_device_family=$(grep "ro.build.device_family" build/portrom/images/my_product/build.prop |awk 'NR==1' |cut -d '=' -f 2 || true)
+if [ -z "$target_device_family" ]; then
+    target_device_family="$base_device_family"
+fi
 
 # Security Patch Date
 portrom_version_security_patch=$(< build/portrom/images/my_manifest/build.prop grep "ro.build.version.security_patch" |awk 'NR==1' |cut -d '=' -f 2 )
@@ -518,7 +592,7 @@ PORT_PROP="build/portrom/images/my_manifest/build.prop"
 KEYS="\.name= \.model= \.manufacturer= \.device= \.brand= \.my_product.type="
 
 for k in $KEYS; do
-    grep "$k" "$BASE_PROP" | while IFS='=' read -r key value; do
+    grep "$k" "$BASE_PROP" 2>/dev/null | while IFS='=' read -r key value; do
         if [[ "$key" == "ro.product.vendor.brand" ]]; then
             # 特殊处理：强制写 OPPO
             sed -i "s|^$key=.*|$key=OPPO|" "$PORT_PROP" 
@@ -527,13 +601,14 @@ for k in $KEYS; do
         fi
     done
 done
+
 # OOS 16 mixed port
 if [[ -n $vendor_cpu_abilist32 ]] ;then
     sed -i "/ro.zygote=zygote64/d" build/portrom/images/my_manifest/build.prop
 fi
 #其他机型可能没有default.prop
 for prop_file in $(find build/portrom/images/vendor/ -name "*.prop"); do
-    vndk_version=$(< "$prop_file" grep "ro.vndk.version" | awk "NR==1" | cut -d '=' -f 2)
+    vndk_version=$(grep "ro.vndk.version" "$prop_file" | awk "NR==1" | cut -d '=' -f 2 || true)
     if [ -n "$vndk_version" ]; then
         yellow "ro.vndk.version为$vndk_version" "ro.vndk.version found in $prop_file: $vndk_version"
         break  
@@ -552,9 +627,11 @@ done
 
 
 old_face_unlock_app=$(find build/baserom/images/my_product -name "OPFaceUnlock.apk")
+<< SERVICES_JAR
 if [[ -f build/${app_patch_folder}/patched/services.jar ]];then
     blue "复制已经处理过的services.jar"
     cp -rfv build/${app_patch_folder}/patched/services.jar build/portrom/images/system/system/framework/services.jar
+
 elif [[ -f build/portrom/images/system/system/framework/services.jar ]];then 
     if [[ ! -d tmp ]];then
         mkdir -p tmp/
@@ -578,14 +655,21 @@ elif [[ -f build/portrom/images/system/system/framework/services.jar ]];then
     for (( i=0; i<${#smalis[@]}; i++ )); do
         smali="${smalis[i]}"
         method="${methods[i]}"
-        
+
         target_file=$(find tmp/services -type f -name "${smali}.smali")
         echo "smali is $smali"
         echo "target_file is $target_file"
-        
+
         if [[ -f $target_file ]]; then
             for single_method in $method; do
                 python3 bin/patchmethod.py $target_file $single_method && echo "${target_file} patched successfully"
+                echo "Patching smali file: $target_file method: $single_method"
+
+                if ! python3 bin/patchmethod.py $target_file $single_method; then
+                    echo "ERROR: smali patch failed"
+                    exit 1
+                fi
+
             done
         fi
     done
@@ -631,8 +715,8 @@ elif [[ -f build/portrom/images/system/system/framework/services.jar ]];then
 
     java -jar bin/apktool/APKEditor.jar b -f -i tmp/services -o build/${app_patch_folder}/patched/services.jar 
     cp -rfv build/${app_patch_folder}/patched/services.jar build/portrom/images/system/system/framework/services.jar
-
 fi
+SERVICES_JAR
 
 if [[ -f build/${app_patch_folder}/patched/framework.jar ]];then
     blue "复制已经处理过的framework.jar"
@@ -1225,8 +1309,19 @@ cp -rf build/baserom/images/my_product/etc/default_volume_tables.xml build/portr
 if [[ -d build/baserom/images/my_product/etc/breenospeech2 ]];then
     cp -rf build/baserom/images/my_product/etc/breenospeech2/* build/portrom/images/my_product/etc/breenospeech2/
 fi
+
 rm -rf build/portrom/images/my_product/etc/fusionlight_profile/*
-cp -rf build/baserom/images/my_product/etc/fusionlight_profile/*  build/portrom/images/my_product/etc/fusionlight_profile/
+#cp -rf build/baserom/images/my_product/etc/fusionlight_profile/*  build/portrom/images/my_product/etc/fusionlight_profile/
+dst="build/portrom/images/my_product/etc/fusionlight_profile"
+src_pattern="build/baserom/images/my_product/etc/fusionlight_profile/*"
+
+mkdir -p "$dst"
+
+if compgen -G "$src_pattern" > /dev/null; then
+    cp -rf $src_pattern "$dst"
+else
+    yellow "Aucun fichier à copier depuis $src_pattern — skip"
+fi
 # Fix game audio issue on 15.0.2 (13t)
 
 
@@ -1327,7 +1422,18 @@ cp -rf  build/baserom/images/my_product/etc/refresh_rate_config.xml build/portro
 
 cp -rf  build/baserom/images/my_product/etc/sys_resolution_switch_config.xml build/portrom/images/my_product/etc/sys_resolution_switch_config.xml
 
-cp -rf build/baserom/images/my_product/etc/permissions/com.oplus.sensor_config.xml build/portrom/images/my_product/etc/permissions/
+#cp -rf build/baserom/images/my_product/etc/permissions/com.oplus.sensor_config.xml build/portrom/images/my_product/etc/permissions/
+dst="build/portrom/images/my_product/etc/permissions/"
+src_pattern="build/baserom/images/my_product/etc/permissions/com.oplus.sensor_config.xml"
+
+mkdir -p "$dst"
+
+if compgen -G "$src_pattern" > /dev/null; then
+    cp -rf $src_pattern "$dst"
+else
+    yellow "Aucun fichier à copier depuis $src_pattern — skip"
+fi
+
 # add_feature "com.android.systemui.support_media_show" build/portrom/images/my_product/etc/extension/com.oplus.app-features.xml
 
 # Features Extension
@@ -1728,19 +1834,52 @@ done
 
 super_computing=$(find build/portrom/images/my_product -name "string_super_computing*")
 if [[ ! -f $super_computing ]];then
-    cp -rf devices/common/super_computing/* build/portrom/images/my_product/etc/
-fi
+#    cp -rf devices/common/super_computing/* build/portrom/images/my_product/etc/
+src_dir="devices/common/super_computing/*"
+dst="build/portrom/images/my_product/etc/"
 
-baseCarrierConfigOverlay=$(find build/baserom/images/ -type f -name "CarrierConfigOverlay*.apk")
-portCarrierConfigOverlay=$(find build/portrom/images/ -type f -name "CarrierConfigOverlay*.apk")
-if [ -f "${baseCarrierConfigOverlay}" ] && [ -f "${portCarrierConfigOverlay}" ];then
-    blue "正在替换 [CarrierConfigOverlay.apk]" "Replacing [CarrierConfigOverlay.apk]"
-    rm -rf ${portCarrierConfigOverlay}
-    cp -rf ${baseCarrierConfigOverlay} $(dirname ${portCarrierConfigOverlay})
+if [ -d "$src_dir" ] && find "$src_dir" -mindepth 1 | read -r _; then
+    mkdir -p "$dst"
+    cp -r "$src_dir"/* "$dst"
 else
-    cp -rf ${baseCarrierConfigOverlay} build/portrom/images/my_product/overlay/
+    yellow "Source absente ou vide: $src_dir"
+fi
 fi
 
+#baseCarrierConfigOverlay=$(find build/baserom/images/ -type f -name "CarrierConfigOverlay*.apk")
+#portCarrierConfigOverlay=$(find build/portrom/images/ -type f -name "CarrierConfigOverlay*.apk")
+#if [ -f "${baseCarrierConfigOverlay}" ] && [ -f "${portCarrierConfigOverlay}" ];then
+#    blue "正在替换 [CarrierConfigOverlay.apk]" "Replacing [CarrierConfigOverlay.apk]"
+#    rm -rf ${portCarrierConfigOverlay}
+#    cp -rf ${baseCarrierConfigOverlay} $(dirname ${portCarrierConfigOverlay})
+#else
+#    cp -rf ${baseCarrierConfigOverlay} build/portrom/images/my_product/overlay/
+#fi
+
+# trouver fichiers source et destination (sécurisé pour espaces/newlines)
+mapfile -d '' -t base_files < <(find build/baserom/images/ -type f -name "CarrierConfigOverlay*.apk" -print0)
+mapfile -d '' -t port_files < <(find build/portrom/images/ -type f -name "CarrierConfigOverlay*.apk" -print0)
+
+dst_dir="build/portrom/images/my_product/overlay"
+mkdir -p "$dst_dir"
+
+if (( ${#base_files[@]} == 0 )); then
+    yellow "Aucun CarrierConfigOverlay*.apk trouvé dans build/baserom/images/ — rien à faire."
+else
+    blue "Replacing or adding CarrierConfigOverlay*.apk from base -> portrom"
+    # Optionnel : supprimer les fichiers port existants avant copie
+    if (( ${#port_files[@]} )); then
+        for f in "${port_files[@]}"; do
+            rm -f -- "$f"
+            green "Removed existing: $f"
+        done
+    fi
+
+    # Copier chaque fichier base vers le dossier de destination (écrase si même nom)
+    for src in "${base_files[@]}"; do
+        cp -v -- "$src" "$dst_dir"/
+    done
+fi
 
 
 #add_feature "oplus.software.display.eyeprotect_paper_texture_support" build/portrom/images/my_product/etc/extension/com.oplus.oplus-feature.xml
@@ -2012,7 +2151,7 @@ done
 
 
 while IFS= read -r prop; do
-    val=$(grep -E '^ro.build.kernel.id=' "$prop" | cut -d= -f2)
+    val=$(grep -E '^ro.build.kernel.id=' "$prop" | cut -d= -f2 || true)
     if [ -n "$val" ]; then
         kernel_id="$val"
         kernel_prop="$prop"
@@ -2065,6 +2204,11 @@ fi
 # 去除avb校验
 blue "去除avb校验" "Disable avb verification."
 disable_avb_verify build/portrom/images/
+
+echo "Partition layout after AVB removal:"
+find build/portrom/images -maxdepth 2 -type f | sort
+echo "================================="
+
 
 # data 加密
 remove_data_encrypt=$(grep "remove_data_encryption" bin/port_config |cut -d '=' -f 2)

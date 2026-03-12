@@ -2,6 +2,9 @@ import sys
 import re
 import os
 
+print("PatchMethod started")
+print("Target file:", sys.argv)
+
 STUB_METHOD = '''\
     .locals 1
     const/4 v0, 0x%s
@@ -67,3 +70,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+print("Patch applied successfully")
