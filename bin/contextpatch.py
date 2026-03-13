@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import os
+import sys
 from difflib import SequenceMatcher
 from typing import Generator, Any
 from re import escape, match

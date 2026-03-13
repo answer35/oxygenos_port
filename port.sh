@@ -10,6 +10,26 @@
 
 # Test Port ROM: OnePlus 12 (ColorOS_14.0.0.810), OnePlus ACE3V(ColorOS_14.0.1.621) Realme GT Neo5 240W(RMX3708_14.0.0.800)
 
+# Add global log file generation
+LOGFILE=build_$(date +%Y%m%d_%H%M%S).log
+exec > >(tee -a "$LOGFILE") 2>&1
+
+echo "============================="
+echo " ColorOS Port Build Started"
+echo "============================="
+echo "Date: $(date)"
+echo "User: $(whoami)"
+echo "Host: $(hostname)"
+echo "Kernel: $(uname -r)"
+echo "CPU: $(lscpu | grep 'Model name' | sed 's/Model name://')"
+echo "RAM: $(free -h)"
+echo "============================="
+
+# Stop script if any error encountered
+set -e
+set -o pipefail
+set -x
+
 build_user="Bruce Teng"
 build_host=$(hostname)
 
@@ -25,17 +45,34 @@ export PATH=$(pwd)/bin/$(uname)/$(uname -m)/:$(pwd)/otatools/bin/:$PATH
 # Import functions
 source functions.sh
 
+export JAVA_HOME=/usr/lib/jvm/temurin-17-jdk
+export PATH=$JAVA_HOME/bin:$PATH
+
+echo "Using JAVA_HOME=$JAVA_HOME"
+java -version
+
 check unzip aria2c 7z zip java python3 zstd bc xmlstarlet
 
+echo "Tool versions:"
+echo "java: $(java -version 2>&1 | head -n1)"
+echo "python3: $(python3 --version)"
+echo "zipalign: $(which zipalign)"
+echo "apksigner: $(which apksigner)"
+echo "mkfs.erofs: $(which mkfs.erofs)"
+mkfs.erofs -V || true
+echo "xmlstarlet: $(which xmlstarlet)"
+echo "7z: $(which 7z)"
+echo "================================="
+
 # 可在 bin/port_config 中更改
-port_partition=$(grep "partition_to_port" bin/port_config |cut -d '=' -f 2)
-super_list=$(grep "possible_super_list" bin/port_config |cut -d '=' -f 2)
-repackext4=$(grep "repack_with_ext4" bin/port_config |cut -d '=' -f 2)
-super_extended=$(grep "super_extended" bin/port_config |cut -d '=' -f 2)
-pack_with_dsu=$(grep "pack_with_dsu" bin/port_config | cut -d '=' -f 2)
-pack_method=$(grep "pack_method" bin/port_config | cut -d '=' -f 2)
-ddr_type=$(grep "ddr_type" bin/port_config | cut -d '=' -f 2)
-reusabe_partition_list=$(grep "reusabe_partition_list" bin/port_config | cut -d '=' -f 2)
+port_partition=$(grep "partition_to_port" bin/port_config |cut -d '=' -f 2 ||true)
+super_list=$(grep "possible_super_list" bin/port_config |cut -d '=' -f 2 ||true)
+repackext4=$(grep "repack_with_ext4" bin/port_config |cut -d '=' -f 2 ||true)
+super_extended=$(grep "super_extended" bin/port_config |cut -d '=' -f 2 ||true)
+pack_with_dsu=$(grep "pack_with_dsu" bin/port_config | cut -d '=' -f 2 ||true)
+pack_method=$(grep "pack_method" bin/port_config | cut -d '=' -f 2 ||true)
+ddr_type=$(grep "ddr_type" bin/port_config | cut -d '=' -f 2 ||true)
+reusabe_partition_list=$(grep "reusabe_partition_list" bin/port_config | cut -d '=' -f 2 ||true)
 if [[ ${repackext4} == true ]]; then
     pack_type=EXT
 else
@@ -226,7 +263,14 @@ if [[ -n ${version_name} ]] && [[ -d build/${version_name} ]]; then
          "Cached ${version_name} folder detected, copying..."
     IFS=',' read -ra PARTS <<< "$port_partition"
     for i in "${PARTS[@]}"; do
-        cp -rfv "build/${version_name}/${i}.img" build/portrom/images/
+        if [[ -f "build/${version_name}/${i}.img" ]]; then
+            cp -rfv "build/${version_name}/${i}.img" build/portrom/images/
+        elif [[ -f "devices/common/${i}_empty.img" ]]; then
+            yellow "${i}.img missing, using empty image"
+            cp -rfv "devices/common/${i}_empty.img" "build/portrom/images/${i}.img"
+        else
+            yellow "${i}.img missing, skipping"
+        fi
     done
 
 else
@@ -322,7 +366,7 @@ done
 # Move those to portrom folder. We need to pack those imgs into final port rom
 for image in vendor odm my_company my_preload system_dlkm vendor_dlkm my_engineering;do
     if [ -f build/baserom/images/${image}.img ];then
-        mv -f build/baserom/images/${image}.img build/portrom/images/${image}.img
+        cp -f build/baserom/images/${image}.img build/portrom/images/${image}.img
 
         # Extracting vendor at first, we need to determine which super parts to pack from Baserom fstab. 
         extract_partition build/portrom/images/${image}.img build/portrom/images/
@@ -354,7 +398,7 @@ for part in ${super_list};do
         rm -rf "${work_dir}/build/baserom/images/${part}.img"
         ) &
     else
-        yellow "跳过从PORTORM提取分区[${part}]" "Skip extracting [${part}] from PORTROM"
+        yellow "跳过从PORTROM提取分区[${part}]" "Skip extracting [${part}] from PORTROM"
     fi
 done
 wait
@@ -421,7 +465,7 @@ base_product_first_api_level=$(< build/baserom/images/my_manifest/build.prop gre
 port_product_first_api_level=$(< build/portrom/images/my_manifest/build.prop grep "ro.product.first_api_level" |awk 'NR==1' |cut -d '=' -f 2)
 
 base_device_family=$(< build/baserom/images/my_product/build.prop grep "ro.build.device_family" |awk 'NR==1' |cut -d '=' -f 2)
-target_device_family=$(< build/portrom/images/my_product/build.prop grep "ro.build.device_family" |awk 'NR==1' |cut -d '=' -f 2)
+target_device_family=$(< build/portrom/images/my_product/build.prop grep "ro.build.device_family" |awk 'NR==1' |cut -d '=' -f 2 || true)
 
 # Security Patch Date
 portrom_version_security_patch=$(< build/portrom/images/my_manifest/build.prop grep "ro.build.version.security_patch" |awk 'NR==1' |cut -d '=' -f 2 )
@@ -533,12 +577,25 @@ if [[ -n $vendor_cpu_abilist32 ]] ;then
 fi
 #其他机型可能没有default.prop
 for prop_file in $(find build/portrom/images/vendor/ -name "*.prop"); do
-    vndk_version=$(< "$prop_file" grep "ro.vndk.version" | awk "NR==1" | cut -d '=' -f 2)
+while IFS= read -r -d '' prop_file; do
+    vndk_version=$(< "$prop_file" grep "ro.vndk.version" | awk "NR==1" | cut -d '=' -f 2 || true)
     if [ -n "$vndk_version" ]; then
         yellow "ro.vndk.version为$vndk_version" "ro.vndk.version found in $prop_file: $vndk_version"
         break  
     fi
+    vndk_version=$(< "$prop_file" grep "ro.vendor.build.version.sdk" | awk "NR==1" | cut -d '=' -f 2 || true)
+    if [ -n "$vndk_version" ]; then
+        yellow "ro.vendor.build.version.sdk为$vndk_version" "ro.vendor.build.version.sdk found in $prop_file: $vndk_version"
+        break  
+    fi
+done < <(find build/portrom/images/vendor/ -name "*.prop" -print0)
 done
+
+if [ -z "$vndk_version" ]; then
+    error "Unable to determine VNDK version: neither ro.vndk.version nor ro.vendor.build.version.sdk found in vendor props."
+    exit 1
+fi
+
 base_vndk=$(find build/baserom/images/system_ext/apex -type f -name "com.android.vndk.v${vndk_version}.apex")
 port_vndk=$(find build/portrom/images/system_ext/apex -type f -name "com.android.vndk.v${vndk_version}.apex")
 
@@ -1226,7 +1283,12 @@ if [[ -d build/baserom/images/my_product/etc/breenospeech2 ]];then
     cp -rf build/baserom/images/my_product/etc/breenospeech2/* build/portrom/images/my_product/etc/breenospeech2/
 fi
 rm -rf build/portrom/images/my_product/etc/fusionlight_profile/*
-cp -rf build/baserom/images/my_product/etc/fusionlight_profile/*  build/portrom/images/my_product/etc/fusionlight_profile/
+if compgen -G "build/baserom/images/my_product/etc/fusionlight_profile/*" > /dev/null; then
+    cp -rf build/baserom/images/my_product/etc/fusionlight_profile/*  build/portrom/images/my_product/etc/fusionlight_profile/
+else
+    yellow "Aucun fichier à copier depuis build/baserom/images/my_product/etc/fusionlight_profile/* — skip"
+fi
+
 # Fix game audio issue on 15.0.2 (13t)
 
 
@@ -1327,7 +1389,12 @@ cp -rf  build/baserom/images/my_product/etc/refresh_rate_config.xml build/portro
 
 cp -rf  build/baserom/images/my_product/etc/sys_resolution_switch_config.xml build/portrom/images/my_product/etc/sys_resolution_switch_config.xml
 
-cp -rf build/baserom/images/my_product/etc/permissions/com.oplus.sensor_config.xml build/portrom/images/my_product/etc/permissions/
+if compgen -G build/baserom/images/my_product/etc/permissions/com.oplus.sensor_config.xml > /dev/null; then
+    cp -rf build/baserom/images/my_product/etc/permissions/com.oplus.sensor_config.xml build/portrom/images/my_product/etc/permissions/
+else
+    yellow "Aucun fichier à copier depuis build/baserom/images/my_product/etc/permissions/com.oplus.sensor_config.xml — skip"
+fi
+
 # add_feature "com.android.systemui.support_media_show" build/portrom/images/my_product/etc/extension/com.oplus.app-features.xml
 
 # Features Extension
@@ -1369,7 +1436,7 @@ oplus_features=(
     "oplus.software.audio.super_volume_4x^400%超级音量"
     "oplus.software.radio.networkless_sms_support"
     "com.oplus.location.car_phone_connection"
-   "oplus.software.display.enhance_brightness_with_uidimming^LocalHDR"
+    "oplus.software.display.enhance_brightness_with_uidimming^LocalHDR"
     "oplus.software.adaptive_smooth_animation^山海通信网络引擎"
     "oplus.software.radio.ai_link_boost"
     "oplus.software.radio.ai_link_boost_notification"
@@ -1431,7 +1498,7 @@ app_features=(
     "feature.support.game.ASSIST_KEY"
     "oplus.software.vibration_custom"
     "com.oplus.smartmediacontroller.lss_assistant_enable^侧边栏声音分轨助手"
-    # "com.android.incallui.share_screen_and_touch_cmd_support^电话触摸分享与屏幕共享" 会导致OOS 拨打电话崩溃
+    #"com.android.incallui.share_screen_and_touch_cmd_support^电话触摸分享与屏幕共享" 会导致OOS 拨打电话崩溃
     "com.oplus.phonemanager.ai_voice_detect^合成语音^args=\"int:1\""
     "com.oplus.directservice.aitoolbox_enable^^args=\"boolean:true\""
     "com.coloros.support_gt_boost^^args=\"boolean:true\""
@@ -1728,19 +1795,23 @@ done
 
 super_computing=$(find build/portrom/images/my_product -name "string_super_computing*")
 if [[ ! -f $super_computing ]];then
-    cp -rf devices/common/super_computing/* build/portrom/images/my_product/etc/
+    if [ -d devices/common/super_computing/* ] && find devices/common/super_computing/* -mindepth 1 | read -r _; then
+        cp -rf devices/common/super_computing/* build/portrom/images/my_product/etc/
+        yellow "Source absente ou vide: $src_dir"
+    fi
 fi
 
 baseCarrierConfigOverlay=$(find build/baserom/images/ -type f -name "CarrierConfigOverlay*.apk")
 portCarrierConfigOverlay=$(find build/portrom/images/ -type f -name "CarrierConfigOverlay*.apk")
-if [ -f "${baseCarrierConfigOverlay}" ] && [ -f "${portCarrierConfigOverlay}" ];then
-    blue "正在替换 [CarrierConfigOverlay.apk]" "Replacing [CarrierConfigOverlay.apk]"
-    rm -rf ${portCarrierConfigOverlay}
-    cp -rf ${baseCarrierConfigOverlay} $(dirname ${portCarrierConfigOverlay})
-else
-    cp -rf ${baseCarrierConfigOverlay} build/portrom/images/my_product/overlay/
+if [ -f "${baseCarrierConfigOverlay}" ];then
+    if [ -f "${baseCarrierConfigOverlay}" ] && [ -f "${portCarrierConfigOverlay}" ];then
+        blue "正在替换 [CarrierConfigOverlay.apk]" "Replacing [CarrierConfigOverlay.apk]"
+        rm -rf ${portCarrierConfigOverlay}
+        cp -rf ${baseCarrierConfigOverlay} $(dirname ${portCarrierConfigOverlay})
+    else
+        cp -rf ${baseCarrierConfigOverlay} build/portrom/images/my_product/overlay/
+    fi
 fi
-
 
 
 #add_feature "oplus.software.display.eyeprotect_paper_texture_support" build/portrom/images/my_product/etc/extension/com.oplus.oplus-feature.xml
@@ -2010,15 +2081,14 @@ for anykernel_dir in tmp/anykernel*; do
     rm -rf $anykernel_dir
 done
 
-
-while IFS= read -r prop; do
-    val=$(grep -E '^ro.build.kernel.id=' "$prop" | cut -d= -f2)
-    if [ -n "$val" ]; then
-        kernel_id="$val"
-        kernel_prop="$prop"
-        break
-    fi
-done < <(find "$work_dir/build/portrom/images" -type f -name "build.prop")
+match=$(grep -R --include="build.prop" -H -m1 -E '^ro.build.kernel.id=' "$work_dir/build/portrom/images" 2>/dev/null || true)
+if [ -n "$match" ]; then
+    kernel_prop=${match%%:*}
+    kernel_id=${match#*=}
+    echo "Found kernel id='$kernel_id' in file: $kernel_prop"
+else
+    echo "ro.build.kernel.id not found under $work_dir/build/portrom/images" >&2
+fi
 
 kernel_major=$(echo "$kernel_id" | grep -Eo '^[0-9]+\.[0-9]+')
 

@@ -334,21 +334,59 @@ patch_kernel() {
 
     # 处理 ramdisk.cpio（如果存在）
     if [ -f ramdisk.cpio ]; then
-        local comp
-        comp=$(magiskboot decompress ramdisk.cpio | grep -v 'raw' | sed -n 's;.*\[\(.*\)\];\1;p')
-        if [ -n "$comp" ]; then
-            mv -f ramdisk.cpio ramdisk.cpio."$comp"
-            magiskboot decompress ramdisk.cpio."$comp" ramdisk.cpio > /dev/null 2>&1
-            if [ $? -ne 0 ] && $comp --help > /dev/null 2>&1; then
-                $comp -dc ramdisk.cpio."$comp" > ramdisk.cpio
+        local comp mb_out
+
+        mb_out=$(magiskboot decompress ramdisk.cpio 2>&1) || true
+        comp=$(printf '%s\n' "$mb_out" | sed -n 's/.*\[\(.*\)\].*/\1/p' || true)
+
+        if [ -z "$comp" ] || [ "$comp" = "raw" ]; then
+            :
+        else
+            mv -f ramdisk.cpio "ramdisk.cpio.$comp"
+
+            if ! magiskboot decompress "ramdisk.cpio.$comp" ramdisk.cpio >/dev/null 2>&1; then
+
+                if command -v "$comp" >/dev/null 2>&1; then
+                    case "$comp" in
+                        gzip|gunzip)
+                            gunzip -c "ramdisk.cpio.$comp" > ramdisk.cpio
+                            ;;
+                        xz)
+                            xz -d -c "ramdisk.cpio.$comp" > ramdisk.cpio
+                            ;;
+                        bzip2|bz2)
+                            bzip2 -d -c "ramdisk.cpio.$comp" > ramdisk.cpio
+                            ;;
+                        lz4)
+                            lz4 -d -c "ramdisk.cpio.$comp" > ramdisk.cpio
+                            ;;
+                        zstd|zstdmt)
+                            zstd -d -c "ramdisk.cpio.$comp" > ramdisk.cpio
+                            ;;
+                        brotli|br)
+                            brotli -d -c "ramdisk.cpio.$comp" > ramdisk.cpio
+                            ;;
+                        *)
+                            # Tentative générique : certains compresseurs supportent -dc
+                            if "$comp" -dc "ramdisk.cpio.$comp" > ramdisk.cpio 2>/dev/null; then
+                                :
+                            else
+                                echo "Unknown or unsupported decompressor '$comp' — cannot decompress ramdisk.cpio.$comp" >&2
+                            fi
+                            ;;
+                    esac
+                else
+                    echo "Decompressor '$comp' not found on PATH; cannot decompress ramdisk.cpio.$comp" >&2
+                fi
             fi
         fi
-        mkdir -p ramdisk
-        chmod 755 ramdisk
-        cd ramdisk || { error "无法进入 ramdisk 目录"; exit 1; }
-        EXTRACT_UNSAFE_SYMLINKS=1 cpio -d -F ../ramdisk.cpio -i > /dev/null 2>&1
-        cd ..
-    fi
+
+    mkdir -p ramdisk
+    chmod 755 ramdisk
+    cd ramdisk || { error "无法进入 ramdisk 目录"; exit 1; }
+    EXTRACT_UNSAFE_SYMLINKS=1 cpio -d -F ../ramdisk.cpio -i > /dev/null 2>&1
+    cd ..
+fi
 
     disable_avb_verify "${tmp_dir}/"
 
@@ -376,15 +414,51 @@ patch_kernel() {
         cd ramdisk || { error "无法进入 ramdisk 目录"; exit 1; }
         find . | sed 1d | cpio -H newc -R 0:0 -o -F ../ramdisk_new.cpio > /dev/null 2>&1
         cd ..
-        if [ -n "$comp" ]; then
-            magiskboot compress=$comp ramdisk_new.cpio
-            if [ $? -ne 0 ] && $comp --help > /dev/null 2>&1; then
-                $comp -9c ramdisk_new.cpio > ramdisk.cpio."$comp"
+
+        if [ -z "$comp" ] || [ "$comp" = "raw" ]; then
+            echo "Repacking ramdisk: no compression (comp='$comp'), using raw cpio"
+            mv -f ramdisk_new.cpio ramdisk.cpio
+        else
+            if magiskboot compress="$comp" ramdisk_new.cpio >/dev/null 2>&1; then
+                :
+            else
+                if command -v "$comp" >/dev/null 2>&1; then
+                    case "$comp" in
+                        gzip|gunzip)
+                            gunzip -c ramdisk_new.cpio > ramdisk.cpio."$comp"
+                            ;;
+                        xz)
+                            xz -d -c ramdisk_new.cpio > ramdisk.cpio."$comp"
+                            ;;
+                        bzip2|bz2)
+                            bzip2 -d -c ramdisk_new.cpio > ramdisk.cpio."$comp"
+                            ;;
+                        lz4)
+                            lz4 -d -c ramdisk_new.cpio > ramdisk.cpio."$comp"
+                            ;;
+                        zstd|zstdmt)
+                            zstd -d -c ramdisk_new.cpio > ramdisk.cpio."$comp"
+                            ;;
+                        brotli|br)
+                            brotli -d -c ramdisk_new.cpio > ramdisk.cpio."$comp"
+                            ;;
+                        *)
+
+                            if "$comp" -dc ramdisk_new.cpio > ramdisk.cpio."$comp" 2>/dev/null; then
+                                :
+                            else
+                                echo "Unknown compression '$comp' and magiskboot failed; cannot compress ramdisk_new.cpio" >&2
+                            fi
+                            ;;
+                    esac
+                else
+                    echo "magiskboot failed and compressor '$comp' not found on PATH." >&2
+                fi
             fi
+
+            ramdisk_file=$(ls ramdisk_new.cpio* 2>/dev/null | tail -n1)
+            [ -n "$ramdisk_file" ] && cp -f "$ramdisk_file" ramdisk.cpio
         fi
-        local ramdisk_file
-        ramdisk_file=$(ls ramdisk_new.cpio* | tail -n1)
-        [ -n "$ramdisk_file" ] && cp -f "$ramdisk_file" ramdisk.cpio
     fi
 
     local nocompflag=""
@@ -769,7 +843,7 @@ add_prop_from_port() {
     # 处理强制添加属性
     for key in "${force_keys[@]}"; do
         # 安全获取属性值（处理换行符）
-        value=$(grep -m1 "^${key}=" "$old_portrom_prop" | awk -F'=' '{print $2}' | tr -d '\n\r')
+        value=$(grep -m1 "^${key}=" "$old_portrom_prop" || true | awk -F'=' '{print $2}' | tr -d '\n\r')
         
         if [[ -n "$value" ]]; then
             # 删除可能已存在的旧值
@@ -954,7 +1028,7 @@ get_oplusrom_version() {
     # 可能的build.prop文件路径
     local prop_files=(
         "build/portrom/images/my_manifest/build.prop"
-        "build/portorm/images/my_product/build.prop" 
+        "build/portrom/images/my_product/build.prop" 
     )
     
     # 遍历所有可能的build.prop文件
